@@ -18,16 +18,36 @@ const SECRET = "afyaconnect_secret_key";
 const PORT = process.env.PORT || 5000;
 
 // =========================
-// JSON DB PATH
+// SAFE DB PATH (IMPORTANT FIX)
 // =========================
-const dbPath = path.join(__dirname, "database", "database.json");
+const dbPath = path.join(__dirname, "db.json");
 
 // =========================
-// READ DB
+// INIT DB FILE (VERY IMPORTANT FOR RENDER)
+// =========================
+if (!fs.existsSync(dbPath)) {
+    fs.writeFileSync(dbPath, JSON.stringify({
+        users: [],
+        reminders: []
+    }, null, 2));
+}
+
+// =========================
+// READ DB (SAFE)
 // =========================
 function readDB() {
-    const data = fs.readFileSync(dbPath, "utf-8");
-    return JSON.parse(data);
+    try {
+        const data = fs.readFileSync(dbPath, "utf-8");
+
+        if (!data) {
+            return { users: [], reminders: [] };
+        }
+
+        return JSON.parse(data);
+
+    } catch (err) {
+        return { users: [], reminders: [] };
+    }
 }
 
 // =========================
@@ -41,7 +61,10 @@ function writeDB(data) {
 // HEALTH CHECK
 // =========================
 app.get("/", (req, res) => {
-    res.send("🚀 AfyaConnect JSON Backend Running");
+    res.json({
+        success: true,
+        message: "🚀 AfyaConnect Backend Running Successfully"
+    });
 });
 
 // =========================
@@ -49,41 +72,51 @@ app.get("/", (req, res) => {
 // =========================
 app.post("/register", async (req, res) => {
 
-    const { name, phone, password } = req.body;
+    try {
+        const { name, phone, password } = req.body;
 
-    if (!name || !phone || !password) {
-        return res.status(400).json({
+        if (!name || !phone || !password) {
+            return res.status(400).json({
+                success: false,
+                message: "All fields are required"
+            });
+        }
+
+        const db = readDB();
+
+        const exists = db.users.find(u => u.phone === phone);
+
+        if (exists) {
+            return res.status(400).json({
+                success: false,
+                message: "Phone already registered"
+            });
+        }
+
+        const hash = await bcrypt.hash(password, 10);
+
+        const newUser = {
+            id: Date.now(),
+            name,
+            phone,
+            password: hash
+        };
+
+        db.users.push(newUser);
+        writeDB(db);
+
+        res.json({
+            success: true,
+            message: "User registered successfully"
+        });
+
+    } catch (err) {
+        console.log(err);
+        res.status(500).json({
             success: false,
-            message: "All fields required"
+            message: "Server error"
         });
     }
-
-    const db = readDB();
-
-    const exists = db.users.find(u => u.phone === phone);
-    if (exists) {
-        return res.status(400).json({
-            success: false,
-            message: "Phone already exists"
-        });
-    }
-
-    const hash = await bcrypt.hash(password, 10);
-
-    const newUser = {
-        id: Date.now(),
-        name,
-        phone,
-        password: hash
-    };
-
-    db.users.push(newUser);
-    writeDB(db);
-
-    res.json({
-        success: true,
-        message: "User registered successfully"
-    });
 });
 
 // =========================
@@ -91,43 +124,52 @@ app.post("/register", async (req, res) => {
 // =========================
 app.post("/login", async (req, res) => {
 
-    const { phone, password } = req.body;
+    try {
+        const { phone, password } = req.body;
 
-    const db = readDB();
+        const db = readDB();
 
-    const user = db.users.find(u => u.phone === phone);
+        const user = db.users.find(u => u.phone === phone);
 
-    if (!user) {
-        return res.status(404).json({
-            success: false,
-            message: "User not found"
-        });
-    }
-
-    const valid = await bcrypt.compare(password, user.password);
-
-    if (!valid) {
-        return res.status(401).json({
-            success: false,
-            message: "Wrong password"
-        });
-    }
-
-    const token = jwt.sign(
-        { id: user.id, name: user.name, phone: user.phone },
-        SECRET,
-        { expiresIn: "1d" }
-    );
-
-    res.json({
-        success: true,
-        token,
-        user: {
-            id: user.id,
-            name: user.name,
-            phone: user.phone
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found"
+            });
         }
-    });
+
+        const valid = await bcrypt.compare(password, user.password);
+
+        if (!valid) {
+            return res.status(401).json({
+                success: false,
+                message: "Wrong password"
+            });
+        }
+
+        const token = jwt.sign(
+            { id: user.id, name: user.name, phone: user.phone },
+            SECRET,
+            { expiresIn: "1d" }
+        );
+
+        res.json({
+            success: true,
+            token,
+            user: {
+                id: user.id,
+                name: user.name,
+                phone: user.phone
+            }
+        });
+
+    } catch (err) {
+        console.log(err);
+        res.status(500).json({
+            success: false,
+            message: "Server error"
+        });
+    }
 });
 
 // =========================
@@ -138,7 +180,10 @@ function verifyToken(req, res, next) {
     const auth = req.headers["authorization"];
 
     if (!auth) {
-        return res.status(403).json({ message: "No token" });
+        return res.status(403).json({
+            success: false,
+            message: "No token provided"
+        });
     }
 
     try {
@@ -146,8 +191,11 @@ function verifyToken(req, res, next) {
         const decoded = jwt.verify(token, SECRET);
         req.user = decoded;
         next();
-    } catch {
-        return res.status(401).json({ message: "Invalid token" });
+    } catch (err) {
+        return res.status(401).json({
+            success: false,
+            message: "Invalid token"
+        });
     }
 }
 
@@ -158,23 +206,30 @@ app.post("/reminder", verifyToken, (req, res) => {
 
     const { type, message, reminder_date } = req.body;
 
+    if (!message) {
+        return res.status(400).json({
+            success: false,
+            message: "Message required"
+        });
+    }
+
     const db = readDB();
 
-    const reminder = {
+    const newReminder = {
         id: Date.now(),
         user_id: req.user.id,
-        type,
+        type: type || "general",
         message,
-        reminder_date,
+        reminder_date: reminder_date || new Date().toISOString().split("T")[0],
         status: "pending"
     };
 
-    db.reminders.push(reminder);
+    db.reminders.push(newReminder);
     writeDB(db);
 
     res.json({
         success: true,
-        message: "Reminder created"
+        message: "Reminder created successfully"
     });
 });
 
@@ -185,7 +240,9 @@ app.get("/reminders", verifyToken, (req, res) => {
 
     const db = readDB();
 
-    const reminders = db.reminders.filter(r => r.user_id === req.user.id);
+    const reminders = db.reminders.filter(
+        r => String(r.user_id) === String(req.user.id)
+    );
 
     res.json({
         success: true,
@@ -198,13 +255,14 @@ app.get("/reminders", verifyToken, (req, res) => {
 // =========================
 function sendSMS(phone, message) {
     console.log("\n======================");
-    console.log("📩 SMS TO:", phone);
-    console.log(message);
+    console.log("📩 SMS SENT");
+    console.log("TO:", phone);
+    console.log("MESSAGE:", message);
     console.log("======================\n");
 }
 
 // =========================
-// AUTO REMINDER ENGINE
+// AUTO REMINDER ENGINE (CRON)
 // =========================
 cron.schedule("* * * * *", () => {
 
