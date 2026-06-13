@@ -14,47 +14,56 @@ app.use(express.json());
 // =========================
 // CONFIG
 // =========================
-const SECRET = "afyaconnect_secret_key";
+const SECRET = process.env.JWT_SECRET || "afyaconnect_secret_key";
 const PORT = process.env.PORT || 5000;
 
 // =========================
-// SAFE DB PATH (IMPORTANT FIX)
+// DATABASE SETUP (RENDER SAFE)
 // =========================
-const dbPath = path.join(__dirname, "db.json");
+const dbDir = path.join(__dirname, "database");
+const dbPath = path.join(dbDir, "db.json");
 
-// =========================
-// INIT DB FILE (VERY IMPORTANT FOR RENDER)
-// =========================
-if (!fs.existsSync(dbPath)) {
-    fs.writeFileSync(dbPath, JSON.stringify({
-        users: [],
-        reminders: []
-    }, null, 2));
+// auto create DB
+function initDB() {
+    try {
+        if (!fs.existsSync(dbDir)) {
+            fs.mkdirSync(dbDir, { recursive: true });
+        }
+
+        if (!fs.existsSync(dbPath)) {
+            fs.writeFileSync(dbPath, JSON.stringify({
+                users: [],
+                reminders: []
+            }, null, 2));
+        }
+    } catch (err) {
+        console.log("DB INIT ERROR:", err.message);
+    }
 }
+initDB();
 
 // =========================
-// READ DB (SAFE)
+// SAFE DB READ
 // =========================
 function readDB() {
     try {
-        const data = fs.readFileSync(dbPath, "utf-8");
-
-        if (!data) {
-            return { users: [], reminders: [] };
-        }
-
-        return JSON.parse(data);
-
+        const raw = fs.readFileSync(dbPath, "utf-8");
+        return JSON.parse(raw || '{"users":[],"reminders":[]}');
     } catch (err) {
+        console.log("READ DB ERROR:", err.message);
         return { users: [], reminders: [] };
     }
 }
 
 // =========================
-// WRITE DB
+// SAFE DB WRITE
 // =========================
 function writeDB(data) {
-    fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
+    try {
+        fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
+    } catch (err) {
+        console.log("WRITE DB ERROR:", err.message);
+    }
 }
 
 // =========================
@@ -63,7 +72,7 @@ function writeDB(data) {
 app.get("/", (req, res) => {
     res.json({
         success: true,
-        message: "🚀 AfyaConnect Backend Running Successfully"
+        message: "🚀 AfyaConnect API running fine"
     });
 });
 
@@ -71,38 +80,35 @@ app.get("/", (req, res) => {
 // REGISTER
 // =========================
 app.post("/register", async (req, res) => {
-
     try {
         const { name, phone, password } = req.body;
 
         if (!name || !phone || !password) {
             return res.status(400).json({
                 success: false,
-                message: "All fields are required"
+                message: "All fields required"
             });
         }
 
         const db = readDB();
 
         const exists = db.users.find(u => u.phone === phone);
-
         if (exists) {
             return res.status(400).json({
                 success: false,
-                message: "Phone already registered"
+                message: "Phone already exists"
             });
         }
 
         const hash = await bcrypt.hash(password, 10);
 
-        const newUser = {
+        db.users.push({
             id: Date.now(),
             name,
             phone,
             password: hash
-        };
+        });
 
-        db.users.push(newUser);
         writeDB(db);
 
         res.json({
@@ -111,7 +117,6 @@ app.post("/register", async (req, res) => {
         });
 
     } catch (err) {
-        console.log(err);
         res.status(500).json({
             success: false,
             message: "Server error"
@@ -120,12 +125,18 @@ app.post("/register", async (req, res) => {
 });
 
 // =========================
-// LOGIN
+// LOGIN (FIXED STABLE)
 // =========================
 app.post("/login", async (req, res) => {
-
     try {
         const { phone, password } = req.body;
+
+        if (!phone || !password) {
+            return res.status(400).json({
+                success: false,
+                message: "Missing credentials"
+            });
+        }
 
         const db = readDB();
 
@@ -138,7 +149,7 @@ app.post("/login", async (req, res) => {
             });
         }
 
-        const valid = await bcrypt.compare(password, user.password);
+        const valid = await bcrypt.compare(password, user.password || "");
 
         if (!valid) {
             return res.status(401).json({
@@ -167,7 +178,7 @@ app.post("/login", async (req, res) => {
         console.log(err);
         res.status(500).json({
             success: false,
-            message: "Server error"
+            message: "Login server error"
         });
     }
 });
@@ -176,21 +187,19 @@ app.post("/login", async (req, res) => {
 // AUTH MIDDLEWARE
 // =========================
 function verifyToken(req, res, next) {
-
-    const auth = req.headers["authorization"];
-
-    if (!auth) {
-        return res.status(403).json({
-            success: false,
-            message: "No token provided"
-        });
-    }
-
     try {
+        const auth = req.headers.authorization;
+
+        if (!auth) {
+            return res.status(403).json({ success: false, message: "No token" });
+        }
+
         const token = auth.split(" ")[1];
         const decoded = jwt.verify(token, SECRET);
+
         req.user = decoded;
         next();
+
     } catch (err) {
         return res.status(401).json({
             success: false,
@@ -203,82 +212,57 @@ function verifyToken(req, res, next) {
 // CREATE REMINDER
 // =========================
 app.post("/reminder", verifyToken, (req, res) => {
-
     const { type, message, reminder_date } = req.body;
-
-    if (!message) {
-        return res.status(400).json({
-            success: false,
-            message: "Message required"
-        });
-    }
 
     const db = readDB();
 
-    const newReminder = {
+    db.reminders.push({
         id: Date.now(),
         user_id: req.user.id,
-        type: type || "general",
+        type,
         message,
-        reminder_date: reminder_date || new Date().toISOString().split("T")[0],
+        reminder_date,
         status: "pending"
-    };
+    });
 
-    db.reminders.push(newReminder);
     writeDB(db);
 
-    res.json({
-        success: true,
-        message: "Reminder created successfully"
-    });
+    res.json({ success: true, message: "Reminder created" });
 });
 
 // =========================
 // GET REMINDERS
 // =========================
 app.get("/reminders", verifyToken, (req, res) => {
-
     const db = readDB();
 
-    const reminders = db.reminders.filter(
-        r => String(r.user_id) === String(req.user.id)
-    );
+    const data = db.reminders.filter(r => r.user_id === req.user.id);
 
-    res.json({
-        success: true,
-        data: reminders
-    });
+    res.json({ success: true, data });
 });
 
 // =========================
 // SMS SIMULATION
 // =========================
 function sendSMS(phone, message) {
-    console.log("\n======================");
-    console.log("📩 SMS SENT");
-    console.log("TO:", phone);
-    console.log("MESSAGE:", message);
-    console.log("======================\n");
+    console.log("📩 SMS TO:", phone);
+    console.log(message);
 }
 
 // =========================
-// AUTO REMINDER ENGINE (CRON)
+// CRON JOB SAFE
 // =========================
 cron.schedule("* * * * *", () => {
-
     const db = readDB();
 
     const today = new Date().toISOString().split("T")[0];
 
     db.reminders.forEach(r => {
-
         if (r.reminder_date === today && r.status === "pending") {
-
             const user = db.users.find(u => u.id === r.user_id);
 
             if (user) {
-                const msg = `Hello ${user.name}, Reminder: ${r.message}`;
-                sendSMS(user.phone, msg);
+                sendSMS(user.phone, `Hello ${user.name}: ${r.message}`);
                 r.status = "sent";
             }
         }
@@ -288,8 +272,8 @@ cron.schedule("* * * * *", () => {
 });
 
 // =========================
-// START SERVER
+// START
 // =========================
 app.listen(PORT, () => {
-    console.log(`🚀 AfyaConnect running on port ${PORT}`);
+    console.log(`🚀 Server running on ${PORT}`);
 });
