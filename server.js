@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const sqlite3 = require("sqlite3").verbose();
+const Database = require("better-sqlite3");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const path = require("path");
@@ -13,58 +13,44 @@ app.use(cors());
 app.use(express.json());
 
 // =========================
-// SAFE DATABASE PATH (FIX RENDER CRASH)
-// =========================
-const dbPath = path.join(__dirname, "health.db");
-
-// ensure file exists (important for Render)
-if (!fs.existsSync(dbPath)) {
-    fs.writeFileSync(dbPath, "");
-}
-
-// =========================
-// DATABASE CONNECTION
-// =========================
-const db = new sqlite3.Database(dbPath, (err) => {
-    if (err) {
-        console.log("❌ DB ERROR:", err.message);
-    } else {
-        console.log("✅ Database Connected");
-    }
-});
-
-// =========================
-// TABLE INIT (SAFE)
-// =========================
-db.serialize(() => {
-
-    db.run(`
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            phone TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-    `);
-
-    db.run(`
-        CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            type TEXT,
-            message TEXT,
-            reminder_date TEXT,
-            status TEXT DEFAULT 'pending'
-        )
-    `);
-
-});
-
-// =========================
 // CONFIG
 // =========================
 const SECRET = "afyaconnect_secret_key";
 const PORT = process.env.PORT || 5000;
+
+// =========================
+// DATABASE SETUP (RENDER SAFE)
+// =========================
+const dbPath = path.join(__dirname, "health.db");
+
+if (!fs.existsSync(dbPath)) {
+    fs.writeFileSync(dbPath, "");
+}
+
+const db = new Database(dbPath);
+
+console.log("✅ Database Connected");
+
+// =========================
+// INIT TABLES
+// =========================
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    phone TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    type TEXT,
+    message TEXT,
+    reminder_date TEXT,
+    status TEXT DEFAULT 'pending'
+);
+`);
 
 // =========================
 // HEALTH CHECK
@@ -89,29 +75,21 @@ app.post("/register", async (req, res) => {
 
         const hash = await bcrypt.hash(password, 10);
 
-        db.run(
-            `INSERT INTO users(name, phone, password) VALUES(?,?,?)`,
-            [name, phone, hash],
-            function (err) {
-                if (err) {
-                    return res.status(400).json({
-                        success: false,
-                        message: "Phone already exists"
-                    });
-                }
-
-                res.json({
-                    success: true,
-                    message: "User registered successfully",
-                    userId: this.lastID
-                });
-            }
+        const stmt = db.prepare(
+            `INSERT INTO users (name, phone, password) VALUES (?, ?, ?)`
         );
 
+        stmt.run(name, phone, hash);
+
+        res.json({
+            success: true,
+            message: "User registered successfully"
+        });
+
     } catch (error) {
-        res.status(500).json({
+        res.status(400).json({
             success: false,
-            message: "Server error"
+            message: "Phone already exists"
         });
     }
 });
@@ -119,7 +97,7 @@ app.post("/register", async (req, res) => {
 // =========================
 // LOGIN
 // =========================
-app.post("/login", (req, res) => {
+app.post("/login", async (req, res) => {
 
     const { phone, password } = req.body;
 
@@ -130,51 +108,41 @@ app.post("/login", (req, res) => {
         });
     }
 
-    db.get(
-        `SELECT * FROM users WHERE phone = ?`,
-        [phone],
-        async (err, user) => {
+    const user = db.prepare(
+        `SELECT * FROM users WHERE phone = ?`
+    ).get(phone);
 
-            if (err) {
-                return res.status(500).json({
-                    success: false,
-                    message: "Database error"
-                });
-            }
+    if (!user) {
+        return res.status(404).json({
+            success: false,
+            message: "User not found"
+        });
+    }
 
-            if (!user) {
-                return res.status(404).json({
-                    success: false,
-                    message: "User not found"
-                });
-            }
+    const valid = await bcrypt.compare(password, user.password);
 
-            const valid = await bcrypt.compare(password, user.password);
+    if (!valid) {
+        return res.status(401).json({
+            success: false,
+            message: "Wrong password"
+        });
+    }
 
-            if (!valid) {
-                return res.status(401).json({
-                    success: false,
-                    message: "Wrong password"
-                });
-            }
-
-            const token = jwt.sign(
-                { id: user.id, name: user.name, phone: user.phone },
-                SECRET,
-                { expiresIn: "1d" }
-            );
-
-            res.json({
-                success: true,
-                token,
-                user: {
-                    id: user.id,
-                    name: user.name,
-                    phone: user.phone
-                }
-            });
-        }
+    const token = jwt.sign(
+        { id: user.id, name: user.name, phone: user.phone },
+        SECRET,
+        { expiresIn: "1d" }
     );
+
+    res.json({
+        success: true,
+        token,
+        user: {
+            id: user.id,
+            name: user.name,
+            phone: user.phone
+        }
+    });
 });
 
 // =========================
@@ -218,27 +186,17 @@ app.post("/reminder", verifyToken, (req, res) => {
         });
     }
 
-    db.run(
-        `INSERT INTO reminders(user_id, type, message, reminder_date)
-         VALUES(?,?,?,?)`,
-        [req.user.id, type, message, reminder_date],
-        function (err) {
-
-            if (err) {
-                return res.status(500).json({
-                    success: false,
-                    message: "Failed to create reminder"
-                });
-            }
-
-            res.json({
-                success: true,
-                message: "Reminder created",
-                id: this.lastID
-            });
-
-        }
+    const stmt = db.prepare(
+        `INSERT INTO reminders (user_id, type, message, reminder_date)
+         VALUES (?, ?, ?, ?)`
     );
+
+    stmt.run(req.user.id, type, message, reminder_date);
+
+    res.json({
+        success: true,
+        message: "Reminder created"
+    });
 });
 
 // =========================
@@ -246,25 +204,14 @@ app.post("/reminder", verifyToken, (req, res) => {
 // =========================
 app.get("/reminders", verifyToken, (req, res) => {
 
-    db.all(
-        `SELECT * FROM reminders WHERE user_id = ? ORDER BY id DESC`,
-        [req.user.id],
-        (err, rows) => {
+    const reminders = db.prepare(
+        `SELECT * FROM reminders WHERE user_id = ? ORDER BY id DESC`
+    ).all(req.user.id);
 
-            if (err) {
-                return res.status(500).json({
-                    success: false,
-                    message: "Database error"
-                });
-            }
-
-            res.json({
-                success: true,
-                data: rows
-            });
-
-        }
-    );
+    res.json({
+        success: true,
+        data: reminders
+    });
 });
 
 // =========================
@@ -279,7 +226,7 @@ function sendSMS(phone, message) {
 }
 
 // =========================
-// CRON JOB (SAFE PRODUCTION)
+// CRON JOB (AUTO REMINDERS)
 // =========================
 cron.schedule("* * * * *", () => {
 
@@ -287,34 +234,23 @@ cron.schedule("* * * * *", () => {
 
     const today = new Date().toISOString().split("T")[0];
 
-    db.all(
+    const rows = db.prepare(
         `SELECT reminders.*, users.phone, users.name
          FROM reminders
          JOIN users ON users.id = reminders.user_id
-         WHERE reminder_date = ? AND status = 'pending'`,
-        [today],
-        (err, rows) => {
+         WHERE reminder_date = ? AND status = 'pending'`
+    ).all(today);
 
-            if (err) {
-                console.log("Cron DB Error:", err.message);
-                return;
-            }
+    rows.forEach(r => {
 
-            if (!rows || rows.length === 0) return;
+        const msg = `Hello ${r.name}, Reminder: ${r.message}`;
 
-            rows.forEach(r => {
+        sendSMS(r.phone, msg);
 
-                const msg = `Hello ${r.name}, Reminder: ${r.message}`;
-
-                sendSMS(r.phone, msg);
-
-                db.run(
-                    `UPDATE reminders SET status = 'sent' WHERE id = ?`,
-                    [r.id]
-                );
-            });
-        }
-    );
+        db.prepare(
+            `UPDATE reminders SET status = 'sent' WHERE id = ?`
+        ).run(r.id);
+    });
 });
 
 // =========================
