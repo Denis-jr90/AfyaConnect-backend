@@ -5,6 +5,7 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const path = require("path");
 const cron = require("node-cron");
+const fs = require("fs");
 
 const app = express();
 
@@ -12,17 +13,28 @@ app.use(cors());
 app.use(express.json());
 
 // =========================
-// DATABASE
+// SAFE DATABASE PATH (FIX RENDER CRASH)
 // =========================
-const dbPath = path.join(__dirname, "../database/health.db");
+const dbPath = path.join(__dirname, "health.db");
 
+// ensure file exists (important for Render)
+if (!fs.existsSync(dbPath)) {
+    fs.writeFileSync(dbPath, "");
+}
+
+// =========================
+// DATABASE CONNECTION
+// =========================
 const db = new sqlite3.Database(dbPath, (err) => {
-    if (err) console.log("DB ERROR:", err.message);
-    else console.log("Database Connected");
+    if (err) {
+        console.log("❌ DB ERROR:", err.message);
+    } else {
+        console.log("✅ Database Connected");
+    }
 });
 
 // =========================
-// TABLES
+// TABLE INIT (SAFE)
 // =========================
 db.serialize(() => {
 
@@ -45,18 +57,20 @@ db.serialize(() => {
             status TEXT DEFAULT 'pending'
         )
     `);
+
 });
 
 // =========================
-// SECRET
+// CONFIG
 // =========================
 const SECRET = "afyaconnect_secret_key";
+const PORT = process.env.PORT || 5000;
 
 // =========================
 // HEALTH CHECK
 // =========================
 app.get("/", (req, res) => {
-    res.send("AfyaConnect API Running 🚀");
+    res.send("🚀 AfyaConnect API Running Successfully");
 });
 
 // =========================
@@ -88,13 +102,13 @@ app.post("/register", async (req, res) => {
 
                 res.json({
                     success: true,
-                    message: "User registered",
+                    message: "User registered successfully",
                     userId: this.lastID
                 });
             }
         );
 
-    } catch (err) {
+    } catch (error) {
         res.status(500).json({
             success: false,
             message: "Server error"
@@ -121,7 +135,12 @@ app.post("/login", (req, res) => {
         [phone],
         async (err, user) => {
 
-            if (err) return res.status(500).json({ success: false, message: "DB error" });
+            if (err) {
+                return res.status(500).json({
+                    success: false,
+                    message: "Database error"
+                });
+            }
 
             if (!user) {
                 return res.status(404).json({
@@ -166,7 +185,10 @@ function verifyToken(req, res, next) {
     const authHeader = req.headers["authorization"];
 
     if (!authHeader) {
-        return res.status(403).json({ message: "No token provided" });
+        return res.status(403).json({
+            success: false,
+            message: "No token provided"
+        });
     }
 
     try {
@@ -175,7 +197,10 @@ function verifyToken(req, res, next) {
         req.user = decoded;
         next();
     } catch (err) {
-        return res.status(401).json({ message: "Invalid token" });
+        return res.status(401).json({
+            success: false,
+            message: "Invalid token"
+        });
     }
 }
 
@@ -229,7 +254,7 @@ app.get("/reminders", verifyToken, (req, res) => {
             if (err) {
                 return res.status(500).json({
                     success: false,
-                    message: "DB error"
+                    message: "Database error"
                 });
             }
 
@@ -243,18 +268,18 @@ app.get("/reminders", verifyToken, (req, res) => {
 });
 
 // =========================
-// SMS FUNCTION (SIMULATION)
+// SMS SIMULATION
 // =========================
 function sendSMS(phone, message) {
-    console.log("==================================");
+    console.log("\n==================================");
     console.log("📩 SMS SENT");
     console.log("TO:", phone);
     console.log("MESSAGE:", message);
-    console.log("==================================");
+    console.log("==================================\n");
 }
 
 // =========================
-// AUTO SMS ENGINE (PRO LEVEL)
+// CRON JOB (SAFE PRODUCTION)
 // =========================
 cron.schedule("* * * * *", () => {
 
@@ -270,33 +295,31 @@ cron.schedule("* * * * *", () => {
         [today],
         (err, rows) => {
 
-            if (rows && rows.length > 0) {
-
-                rows.forEach(r => {
-
-                    const msg = `Hello ${r.name}, Reminder: ${r.message}`;
-
-                    sendSMS(r.phone, msg);
-
-                    db.run(
-                        `UPDATE reminders SET status = 'sent' WHERE id = ?`,
-                        [r.id]
-                    );
-
-                });
-
+            if (err) {
+                console.log("Cron DB Error:", err.message);
+                return;
             }
 
+            if (!rows || rows.length === 0) return;
+
+            rows.forEach(r => {
+
+                const msg = `Hello ${r.name}, Reminder: ${r.message}`;
+
+                sendSMS(r.phone, msg);
+
+                db.run(
+                    `UPDATE reminders SET status = 'sent' WHERE id = ?`,
+                    [r.id]
+                );
+            });
         }
     );
-
 });
 
 // =========================
 // START SERVER
 // =========================
-const PORT = 5000;
-
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
 });
