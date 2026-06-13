@@ -1,11 +1,10 @@
 const express = require("express");
 const cors = require("cors");
-const Database = require("better-sqlite3");
+const fs = require("fs");
+const path = require("path");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const path = require("path");
 const cron = require("node-cron");
-const fs = require("fs");
 
 const app = express();
 
@@ -19,79 +18,72 @@ const SECRET = "afyaconnect_secret_key";
 const PORT = process.env.PORT || 5000;
 
 // =========================
-// DATABASE SETUP (RENDER SAFE)
+// JSON DB PATH
 // =========================
-const dbPath = path.join(__dirname, "health.db");
+const dbPath = path.join(__dirname, "database", "database.json");
 
-if (!fs.existsSync(dbPath)) {
-    fs.writeFileSync(dbPath, "");
+// =========================
+// READ DB
+// =========================
+function readDB() {
+    const data = fs.readFileSync(dbPath, "utf-8");
+    return JSON.parse(data);
 }
 
-const db = new Database(dbPath);
-
-console.log("✅ Database Connected");
-
 // =========================
-// INIT TABLES
+// WRITE DB
 // =========================
-db.exec(`
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    phone TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS reminders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    type TEXT,
-    message TEXT,
-    reminder_date TEXT,
-    status TEXT DEFAULT 'pending'
-);
-`);
+function writeDB(data) {
+    fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
+}
 
 // =========================
 // HEALTH CHECK
 // =========================
 app.get("/", (req, res) => {
-    res.send("🚀 AfyaConnect API Running Successfully");
+    res.send("🚀 AfyaConnect JSON Backend Running");
 });
 
 // =========================
 // REGISTER
 // =========================
 app.post("/register", async (req, res) => {
-    try {
-        const { name, phone, password } = req.body;
 
-        if (!name || !phone || !password) {
-            return res.status(400).json({
-                success: false,
-                message: "All fields required"
-            });
-        }
+    const { name, phone, password } = req.body;
 
-        const hash = await bcrypt.hash(password, 10);
-
-        const stmt = db.prepare(
-            `INSERT INTO users (name, phone, password) VALUES (?, ?, ?)`
-        );
-
-        stmt.run(name, phone, hash);
-
-        res.json({
-            success: true,
-            message: "User registered successfully"
+    if (!name || !phone || !password) {
+        return res.status(400).json({
+            success: false,
+            message: "All fields required"
         });
+    }
 
-    } catch (error) {
-        res.status(400).json({
+    const db = readDB();
+
+    const exists = db.users.find(u => u.phone === phone);
+    if (exists) {
+        return res.status(400).json({
             success: false,
             message: "Phone already exists"
         });
     }
+
+    const hash = await bcrypt.hash(password, 10);
+
+    const newUser = {
+        id: Date.now(),
+        name,
+        phone,
+        password: hash
+    };
+
+    db.users.push(newUser);
+    writeDB(db);
+
+    res.json({
+        success: true,
+        message: "User registered successfully"
+    });
 });
 
 // =========================
@@ -101,16 +93,9 @@ app.post("/login", async (req, res) => {
 
     const { phone, password } = req.body;
 
-    if (!phone || !password) {
-        return res.status(400).json({
-            success: false,
-            message: "Missing credentials"
-        });
-    }
+    const db = readDB();
 
-    const user = db.prepare(
-        `SELECT * FROM users WHERE phone = ?`
-    ).get(phone);
+    const user = db.users.find(u => u.phone === phone);
 
     if (!user) {
         return res.status(404).json({
@@ -150,25 +135,19 @@ app.post("/login", async (req, res) => {
 // =========================
 function verifyToken(req, res, next) {
 
-    const authHeader = req.headers["authorization"];
+    const auth = req.headers["authorization"];
 
-    if (!authHeader) {
-        return res.status(403).json({
-            success: false,
-            message: "No token provided"
-        });
+    if (!auth) {
+        return res.status(403).json({ message: "No token" });
     }
 
     try {
-        const token = authHeader.split(" ")[1];
+        const token = auth.split(" ")[1];
         const decoded = jwt.verify(token, SECRET);
         req.user = decoded;
         next();
-    } catch (err) {
-        return res.status(401).json({
-            success: false,
-            message: "Invalid token"
-        });
+    } catch {
+        return res.status(401).json({ message: "Invalid token" });
     }
 }
 
@@ -179,19 +158,19 @@ app.post("/reminder", verifyToken, (req, res) => {
 
     const { type, message, reminder_date } = req.body;
 
-    if (!type || !message) {
-        return res.status(400).json({
-            success: false,
-            message: "Type & message required"
-        });
-    }
+    const db = readDB();
 
-    const stmt = db.prepare(
-        `INSERT INTO reminders (user_id, type, message, reminder_date)
-         VALUES (?, ?, ?, ?)`
-    );
+    const reminder = {
+        id: Date.now(),
+        user_id: req.user.id,
+        type,
+        message,
+        reminder_date,
+        status: "pending"
+    };
 
-    stmt.run(req.user.id, type, message, reminder_date);
+    db.reminders.push(reminder);
+    writeDB(db);
 
     res.json({
         success: true,
@@ -204,9 +183,9 @@ app.post("/reminder", verifyToken, (req, res) => {
 // =========================
 app.get("/reminders", verifyToken, (req, res) => {
 
-    const reminders = db.prepare(
-        `SELECT * FROM reminders WHERE user_id = ? ORDER BY id DESC`
-    ).all(req.user.id);
+    const db = readDB();
+
+    const reminders = db.reminders.filter(r => r.user_id === req.user.id);
 
     res.json({
         success: true,
@@ -218,44 +197,41 @@ app.get("/reminders", verifyToken, (req, res) => {
 // SMS SIMULATION
 // =========================
 function sendSMS(phone, message) {
-    console.log("\n==================================");
-    console.log("📩 SMS SENT");
-    console.log("TO:", phone);
-    console.log("MESSAGE:", message);
-    console.log("==================================\n");
+    console.log("\n======================");
+    console.log("📩 SMS TO:", phone);
+    console.log(message);
+    console.log("======================\n");
 }
 
 // =========================
-// CRON JOB (AUTO REMINDERS)
+// AUTO REMINDER ENGINE
 // =========================
 cron.schedule("* * * * *", () => {
 
-    console.log("🔄 Checking reminders...");
+    const db = readDB();
 
     const today = new Date().toISOString().split("T")[0];
 
-    const rows = db.prepare(
-        `SELECT reminders.*, users.phone, users.name
-         FROM reminders
-         JOIN users ON users.id = reminders.user_id
-         WHERE reminder_date = ? AND status = 'pending'`
-    ).all(today);
+    db.reminders.forEach(r => {
 
-    rows.forEach(r => {
+        if (r.reminder_date === today && r.status === "pending") {
 
-        const msg = `Hello ${r.name}, Reminder: ${r.message}`;
+            const user = db.users.find(u => u.id === r.user_id);
 
-        sendSMS(r.phone, msg);
-
-        db.prepare(
-            `UPDATE reminders SET status = 'sent' WHERE id = ?`
-        ).run(r.id);
+            if (user) {
+                const msg = `Hello ${user.name}, Reminder: ${r.message}`;
+                sendSMS(user.phone, msg);
+                r.status = "sent";
+            }
+        }
     });
+
+    writeDB(db);
 });
 
 // =========================
 // START SERVER
 // =========================
 app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🚀 AfyaConnect running on port ${PORT}`);
 });
